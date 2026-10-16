@@ -1,0 +1,17 @@
+services:
+  - type: web
+    name: zentegra-snacks-api
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DB_HOST
+        sync: false
+      - key: DB_USER
+        value: u373142447_snacks
+      - key: DB_PASSWORD
+        sync: false
+      - key: DB_NAME
+        value: u373142447_friday
+      - key: DB_PORT
+        value: "3306"
