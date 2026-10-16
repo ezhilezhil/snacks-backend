@@ -26,15 +26,22 @@ def is_mysql():
 
 def get_connection():
     if is_mysql():
-        return pymysql.connect(
-            host=DB_HOST,
-            user=DB_USER,
-            password=DB_PASSWORD,
-            database=DB_NAME,
-            port=DB_PORT,
-            cursorclass=pymysql.cursors.DictCursor,
-            autocommit=True
-        )
+        try:
+            return pymysql.connect(
+                host=DB_HOST,
+                user=DB_USER,
+                password=DB_PASSWORD,
+                database=DB_NAME,
+                port=DB_PORT,
+                connect_timeout=7,
+                cursorclass=pymysql.cursors.DictCursor,
+                autocommit=True
+            )
+        except Exception as err:
+            print(f"⚠️ Warning: MySQL connection failed ({err}). Falling back to local SQLite.")
+            conn = sqlite3.connect("zentegra_snacks.db")
+            conn.row_factory = sqlite3.Row
+            return conn
     else:
         # Fallback to local SQLite if MySQL credentials not set yet
         conn = sqlite3.connect("zentegra_snacks.db")
