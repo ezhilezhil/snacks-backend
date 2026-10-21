@@ -1,5 +1,8 @@
 import os
-import pymysql
+try:
+    import pymysql
+except ImportError:
+    pymysql = None
 import sqlite3
 from datetime import datetime, date, timedelta
 from dotenv import load_dotenv
@@ -22,7 +25,7 @@ EMPLOYEES_LIST = [
 ]
 
 def is_mysql():
-    return bool(DB_HOST and DB_PASSWORD)
+    return bool(DB_HOST and DB_PASSWORD and pymysql)
 
 def get_connection():
     if is_mysql():
@@ -124,6 +127,35 @@ def init_db():
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
         """)
 
+        # Chat App Tables (SMM Payaluga / Zentegra Chat)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_users (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                username VARCHAR(100) UNIQUE NOT NULL,
+                avatar VARCHAR(50) DEFAULT '🚀',
+                color VARCHAR(20) DEFAULT '#6366f1',
+                last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                user_id INT NULL,
+                username VARCHAR(100) NOT NULL,
+                avatar VARCHAR(50) DEFAULT '🚀',
+                color VARCHAR(20) DEFAULT '#6366f1',
+                text TEXT NULL,
+                image_url LONGTEXT NULL,
+                reply_to_id INT NULL,
+                reply_to_text TEXT NULL,
+                reply_to_user VARCHAR(100) NULL,
+                reactions TEXT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+        """)
+
         # Default Settings
         settings = [
             ('upi_id', '9663287777@ybl'),
@@ -202,6 +234,35 @@ def init_db():
                 action TEXT NOT NULL,
                 performed_by TEXT NOT NULL,
                 details TEXT NOT NULL,
+                created_at TEXT DEFAULT (datetime('now', '+05:30'))
+            );
+        """)
+
+        # Chat App Tables (SQLite fallback)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT UNIQUE NOT NULL,
+                avatar TEXT DEFAULT '🚀',
+                color TEXT DEFAULT '#6366f1',
+                last_seen TEXT DEFAULT (datetime('now', '+05:30')),
+                created_at TEXT DEFAULT (datetime('now', '+05:30'))
+            );
+        """)
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NULL,
+                username TEXT NOT NULL,
+                avatar TEXT DEFAULT '🚀',
+                color TEXT DEFAULT '#6366f1',
+                text TEXT NULL,
+                image_url TEXT NULL,
+                reply_to_id INTEGER NULL,
+                reply_to_text TEXT NULL,
+                reply_to_user TEXT NULL,
+                reactions TEXT NULL,
                 created_at TEXT DEFAULT (datetime('now', '+05:30'))
             );
         """)

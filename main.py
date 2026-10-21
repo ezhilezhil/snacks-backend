@@ -1,5 +1,7 @@
 import os
-from fastapi import FastAPI, HTTPException, Header, Query
+import json
+import asyncio
+from fastapi import FastAPI, HTTPException, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from typing import Optional
@@ -490,3 +492,336 @@ def get_audit_logs(authorization: Optional[str] = Header(None)):
     verify_admin(authorization)
     logs, _ = execute_query("SELECT * FROM audit_logs ORDER BY id DESC LIMIT 100", fetchall=True)
     return {"success": True, "logs": logs}
+
+
+# ==========================================
+# CHAT REALTIME & DATABASE ENDPOINTS
+# SMM Payaluga / Zentegra Team Chat
+# ==========================================
+
+class ChatConnectionManager:
+    def __init__(self):
+        self.active_connections = []
+
+    async def connect(self, websocket: WebSocket):
+        await websocket.accept()
+        self.active_connections.append(websocket)
+
+    def disconnect(self, websocket: WebSocket):
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def broadcast(self, message: dict):
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(message)
+            except Exception:
+                self.disconnect(connection)
+
+chat_manager = ChatConnectionManager()
+
+def broadcast_chat_event(event_type: str, data: dict):
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            asyncio.create_task(chat_manager.broadcast({"type": event_type, "data": data}))
+    except Exception:
+        pass
+
+class ChatRegisterRequest(BaseModel):
+    username: str
+    avatar: Optional[str] = "🚀"
+    color: Optional[str] = "#6366f1"
+
+class ChatHeartbeatRequest(BaseModel):
+    username: Optional[str] = None
+    user_id: Optional[int] = None
+
+class ChatMessageRequest(BaseModel):
+    username: str
+    user_id: Optional[int] = None
+    avatar: Optional[str] = "🚀"
+    color: Optional[str] = "#6366f1"
+    text: Optional[str] = ""
+    image_url: Optional[str] = None
+    reply_to_id: Optional[int] = None
+    reply_to_text: Optional[str] = None
+    reply_to_user: Optional[str] = None
+
+class ChatReactionRequest(BaseModel):
+    username: str
+    emoji: str
+
+@app.websocket("/api/chat/ws")
+async def chat_ws(websocket: WebSocket):
+    await chat_manager.connect(websocket)
+    try:
+        while True:
+            text = await websocket.receive_text()
+            try:
+                payload = json.loads(text)
+                if payload.get("type") == "ping":
+                    await websocket.send_json({"type": "pong"})
+            except Exception:
+                pass
+    except (WebSocketDisconnect, Exception):
+        chat_manager.disconnect(websocket)
+
+@app.post("/api/chat/register")
+def chat_register(req: ChatRegisterRequest):
+    username = (req.username or "").strip()
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+
+    avatar = req.avatar or "🚀"
+    color = req.color or "#6366f1"
+
+    existing, _ = execute_query(
+        "SELECT * FROM chat_users WHERE username = ?",
+        (username,),
+        fetchone=True
+    )
+
+    if existing:
+        if is_mysql():
+            execute_query(
+                "UPDATE chat_users SET last_seen = NOW(), avatar = %s, color = %s WHERE id = %s",
+                (avatar, color, existing['id'])
+            )
+        else:
+            execute_query(
+                "UPDATE chat_users SET last_seen = datetime('now', '+05:30'), avatar = ?, color = ? WHERE id = ?",
+                (avatar, color, existing['id'])
+            )
+        user, _ = execute_query(
+            "SELECT * FROM chat_users WHERE id = ?",
+            (existing['id'],),
+            fetchone=True
+        )
+    else:
+        if is_mysql():
+            _, last_id = execute_query(
+                "INSERT INTO chat_users (username, avatar, color, last_seen) VALUES (%s, %s, %s, NOW())",
+                (username, avatar, color)
+            )
+        else:
+            _, last_id = execute_query(
+                "INSERT INTO chat_users (username, avatar, color, last_seen) VALUES (?, ?, ?, datetime('now', '+05:30'))",
+                (username, avatar, color)
+            )
+        user, _ = execute_query(
+            "SELECT * FROM chat_users WHERE id = ?",
+            (last_id,),
+            fetchone=True
+        )
+
+        arrival_text = f"👋 {username} entered the chat!"
+        if is_mysql():
+            _, join_msg_id = execute_query(
+                "INSERT INTO chat_messages (username, avatar, color, text, created_at) VALUES (%s, %s, %s, %s, NOW())",
+                ("System", "📢", "#10b981", arrival_text)
+            )
+        else:
+            _, join_msg_id = execute_query(
+                "INSERT INTO chat_messages (username, avatar, color, text) VALUES (?, ?, ?, ?)",
+                ("System", "📢", "#10b981", arrival_text)
+            )
+        
+        join_msg, _ = execute_query("SELECT * FROM chat_messages WHERE id = ?", (join_msg_id,), fetchone=True)
+        if join_msg:
+            join_msg["reactions"] = {}
+            if join_msg.get("created_at"):
+                join_msg["created_at"] = str(join_msg["created_at"])
+            broadcast_chat_event("message", join_msg)
+
+    if user and user.get("last_seen"):
+        user["last_seen"] = str(user["last_seen"])
+    if user and user.get("created_at"):
+        user["created_at"] = str(user["created_at"])
+
+    broadcast_chat_event("user_joined", user)
+    return {"success": True, "user": user}
+
+@app.post("/api/chat/heartbeat")
+def chat_heartbeat(req: ChatHeartbeatRequest):
+    if req.username:
+        if is_mysql():
+            execute_query("UPDATE chat_users SET last_seen = NOW() WHERE username = %s", (req.username.strip(),))
+        else:
+            execute_query("UPDATE chat_users SET last_seen = datetime('now', '+05:30') WHERE username = ?", (req.username.strip(),))
+    elif req.user_id:
+        if is_mysql():
+            execute_query("UPDATE chat_users SET last_seen = NOW() WHERE id = %s", (req.user_id,))
+        else:
+            execute_query("UPDATE chat_users SET last_seen = datetime('now', '+05:30') WHERE id = ?", (req.user_id,))
+    return {"success": True}
+
+@app.get("/api/chat/users")
+def chat_get_users():
+    users, _ = execute_query(
+        "SELECT id, username, avatar, color, last_seen, created_at FROM chat_users ORDER BY last_seen DESC",
+        fetchall=True
+    )
+    if not users:
+        users = []
+
+    now = datetime.now()
+    formatted = []
+    for u in users:
+        ls = u.get("last_seen")
+        is_online = False
+        status_text = "Offline"
+
+        if ls:
+            try:
+                if isinstance(ls, str):
+                    try:
+                        dt = datetime.fromisoformat(ls.replace('Z', ''))
+                    except Exception:
+                        dt = datetime.strptime(ls.split('.')[0], "%Y-%m-%d %H:%M:%S")
+                else:
+                    dt = ls
+
+                delta = (now - dt).total_seconds()
+                if delta < 60:
+                    is_online = True
+                    status_text = "Online"
+                elif delta < 3600:
+                    mins = max(1, int(delta / 60))
+                    status_text = f"Active {mins}m ago"
+                elif delta < 86400:
+                    status_text = f"Last seen at {dt.strftime('%I:%M %p')}"
+                else:
+                    status_text = f"Last seen {dt.strftime('%b %d')}"
+            except Exception:
+                status_text = str(ls)
+
+        formatted.append({
+            "id": u.get("id"),
+            "username": u.get("username"),
+            "avatar": u.get("avatar") or "🚀",
+            "color": u.get("color") or "#6366f1",
+            "last_seen": str(ls) if ls else None,
+            "is_online": is_online,
+            "status_text": status_text
+        })
+
+    return {"success": True, "users": formatted}
+
+@app.get("/api/chat/messages")
+def chat_get_messages(limit: int = 150, since_id: Optional[int] = None):
+    if since_id is not None and since_id > 0:
+        msgs, _ = execute_query(
+            "SELECT * FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
+            (since_id, limit),
+            fetchall=True
+        )
+    else:
+        msgs, _ = execute_query(
+            "SELECT * FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?) as sub ORDER BY id ASC",
+            (limit,),
+            fetchall=True
+        )
+    if not msgs:
+        msgs = []
+
+    for m in msgs:
+        raw_rx = m.get("reactions")
+        if raw_rx:
+            try:
+                m["reactions"] = json.loads(raw_rx)
+            except Exception:
+                m["reactions"] = {}
+        else:
+            m["reactions"] = {}
+        if m.get("created_at"):
+            m["created_at"] = str(m["created_at"])
+
+    return {"success": True, "messages": msgs}
+
+@app.post("/api/chat/messages")
+def chat_send_message(req: ChatMessageRequest):
+    username = (req.username or "").strip()
+    text = (req.text or "").strip()
+    image_url = req.image_url or None
+
+    if not username:
+        raise HTTPException(status_code=400, detail="Username is required")
+    if not text and not image_url:
+        raise HTTPException(status_code=400, detail="Message text or image is required")
+
+    # Touch user last_seen
+    if is_mysql():
+        execute_query("UPDATE chat_users SET last_seen = NOW() WHERE username = %s", (username,))
+        _, last_id = execute_query(
+            """INSERT INTO chat_messages 
+               (user_id, username, avatar, color, text, image_url, reply_to_id, reply_to_text, reply_to_user, reactions, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
+            (req.user_id, username, req.avatar or "🚀", req.color or "#6366f1",
+             text, image_url, req.reply_to_id, req.reply_to_text, req.reply_to_user, "{}")
+        )
+    else:
+        execute_query("UPDATE chat_users SET last_seen = datetime('now', '+05:30') WHERE username = ?", (username,))
+        _, last_id = execute_query(
+            """INSERT INTO chat_messages 
+               (user_id, username, avatar, color, text, image_url, reply_to_id, reply_to_text, reply_to_user, reactions)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (req.user_id, username, req.avatar or "🚀", req.color or "#6366f1",
+             text, image_url, req.reply_to_id, req.reply_to_text, req.reply_to_user, "{}")
+        )
+
+    new_msg, _ = execute_query(
+        "SELECT * FROM chat_messages WHERE id = ?",
+        (last_id,),
+        fetchone=True
+    )
+    if new_msg:
+        new_msg["reactions"] = {}
+        if new_msg.get("created_at"):
+            new_msg["created_at"] = str(new_msg["created_at"])
+        broadcast_chat_event("message", new_msg)
+
+    return {"success": True, "message": new_msg}
+
+@app.post("/api/chat/messages/{message_id}/reaction")
+def chat_add_reaction(message_id: int, req: ChatReactionRequest):
+    msg, _ = execute_query(
+        "SELECT * FROM chat_messages WHERE id = ?",
+        (message_id,),
+        fetchone=True
+    )
+    if not msg:
+        raise HTTPException(status_code=404, detail="Message not found")
+
+    raw_rx = msg.get("reactions")
+    rx_dict = {}
+    if raw_rx:
+        try:
+            rx_dict = json.loads(raw_rx)
+        except Exception:
+            rx_dict = {}
+
+    emoji = req.emoji
+    username = req.username.strip()
+
+    user_list = rx_dict.get(emoji, [])
+    if username in user_list:
+        user_list.remove(username)
+        if not user_list:
+            del rx_dict[emoji]
+        else:
+            rx_dict[emoji] = user_list
+    else:
+        user_list.append(username)
+        rx_dict[emoji] = user_list
+
+    new_rx_json = json.dumps(rx_dict)
+    if is_mysql():
+        execute_query("UPDATE chat_messages SET reactions = %s WHERE id = %s", (new_rx_json, message_id))
+    else:
+        execute_query("UPDATE chat_messages SET reactions = ? WHERE id = ?", (new_rx_json, message_id))
+
+    event_data = {"message_id": message_id, "reactions": rx_dict}
+    broadcast_chat_event("reaction", event_data)
+
+    return {"success": True, "message_id": message_id, "reactions": rx_dict}
