@@ -47,7 +47,16 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=True)
     else:
         formatted_query = query.replace("%s", "?")
 
-    cursor.execute(formatted_query, params)
+    try:
+        cursor.execute(formatted_query, params)
+    except Exception as exc:
+        print(f"Execute query failed: {exc} | Query: {formatted_query} | Params: {params}")
+        try:
+            cursor.close()
+            conn.close()
+        except Exception:
+            pass
+        raise exc
     
     data = None
     if fetchone:
@@ -685,10 +694,14 @@ def chat_get_users():
     if _chat_users_cache is not None and (now_ts - _chat_users_cache_time) < 2.5:
         return _chat_users_cache
 
-    users, _ = execute_query(
-        "SELECT id, username, avatar, color, last_seen, created_at FROM chat_users ORDER BY last_seen DESC",
-        fetchall=True
-    )
+    try:
+        users, _ = execute_query(
+            "SELECT id, username, avatar, color, last_seen, created_at FROM chat_users ORDER BY last_seen DESC",
+            fetchall=True
+        )
+    except Exception as err:
+        print(f"chat_get_users error: {err}")
+        users = []
     if not users:
         users = []
 
@@ -739,18 +752,30 @@ def chat_get_users():
 
 @app.get("/api/chat/messages")
 def chat_get_messages(limit: int = 150, since_id: Optional[int] = None):
-    if since_id is not None and since_id > 0:
-        msgs, _ = execute_query(
-            "SELECT * FROM chat_messages WHERE id > ? ORDER BY id ASC LIMIT ?",
-            (since_id, limit),
-            fetchall=True
-        )
-    else:
-        msgs, _ = execute_query(
-            "SELECT * FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT ?) as sub ORDER BY id ASC",
-            (limit,),
-            fetchall=True
-        )
+    try:
+        limit_clean = max(1, min(int(limit), 300))
+        if since_id is not None and since_id > 0:
+            msgs, _ = execute_query(
+                f"SELECT * FROM chat_messages WHERE id > %s ORDER BY id ASC LIMIT {limit_clean}",
+                (since_id,),
+                fetchall=True
+            )
+        else:
+            try:
+                msgs, _ = execute_query(
+                    f"SELECT * FROM (SELECT * FROM chat_messages ORDER BY id DESC LIMIT {limit_clean}) as sub ORDER BY id ASC",
+                    (),
+                    fetchall=True
+                )
+            except Exception:
+                msgs, _ = execute_query(
+                    f"SELECT * FROM chat_messages ORDER BY id ASC LIMIT {limit_clean}",
+                    fetchall=True
+                )
+    except Exception as err:
+        print(f"chat_get_messages error: {err}")
+        msgs = []
+
     if not msgs:
         msgs = []
 
