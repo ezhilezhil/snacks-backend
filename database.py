@@ -24,13 +24,23 @@ EMPLOYEES_LIST = [
     'Sahithi', 'Sirisha', 'Alan', 'Deepak', 'Sajith', 'Sneha', 'Ezhilarasu', 'Pattan'
 ]
 
+_mysql_pool_conn = None
+
 def is_mysql():
     return bool(DB_HOST and DB_PASSWORD and pymysql)
 
 def get_connection():
+    global _mysql_pool_conn
     if is_mysql():
         try:
-            return pymysql.connect(
+            if _mysql_pool_conn is not None:
+                _mysql_pool_conn.ping(reconnect=True)
+                return _mysql_pool_conn
+        except Exception:
+            _mysql_pool_conn = None
+
+        try:
+            _mysql_pool_conn = pymysql.connect(
                 host=DB_HOST,
                 user=DB_USER,
                 password=DB_PASSWORD,
@@ -40,6 +50,7 @@ def get_connection():
                 cursorclass=pymysql.cursors.DictCursor,
                 autocommit=True
             )
+            return _mysql_pool_conn
         except Exception as err:
             print(f"⚠️ Warning: MySQL connection failed ({err}). Falling back to local SQLite.")
             conn = sqlite3.connect("zentegra_snacks.db")

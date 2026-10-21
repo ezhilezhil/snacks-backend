@@ -60,7 +60,9 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=True)
     if not is_mysql() and commit:
         conn.commit()
         
-    conn.close()
+    cursor.close()
+    if not is_mysql():
+        conn.close()
     return data, last_id
 
 def log_audit(order_id, action, performed_by, details):
@@ -567,8 +569,14 @@ async def chat_ws(websocket: WebSocket):
     except (WebSocketDisconnect, Exception):
         chat_manager.disconnect(websocket)
 
+_chat_users_cache = None
+_chat_users_cache_time = 0
+_last_heartbeat = {}
+
 @app.post("/api/chat/register")
 def chat_register(req: ChatRegisterRequest):
+    global _chat_users_cache
+    _chat_users_cache = None
     username = (req.username or "").strip()
     if not username:
         raise HTTPException(status_code=400, detail="Username is required")
@@ -644,6 +652,14 @@ def chat_register(req: ChatRegisterRequest):
 
 @app.post("/api/chat/heartbeat")
 def chat_heartbeat(req: ChatHeartbeatRequest):
+    key = (req.username or "").strip() or str(req.user_id or "")
+    if not key:
+        return {"success": True}
+    now_ts = datetime.now().timestamp()
+    if key in _last_heartbeat and (now_ts - _last_heartbeat[key]) < 15.0:
+        return {"success": True}
+    _last_heartbeat[key] = now_ts
+
     if req.username:
         if is_mysql():
             execute_query("UPDATE chat_users SET last_seen = NOW() WHERE username = %s", (req.username.strip(),))
@@ -658,6 +674,12 @@ def chat_heartbeat(req: ChatHeartbeatRequest):
 
 @app.get("/api/chat/users")
 def chat_get_users():
+    global _chat_users_cache, _chat_users_cache_time
+    now = datetime.now()
+    now_ts = now.timestamp()
+    if _chat_users_cache is not None and (now_ts - _chat_users_cache_time) < 2.5:
+        return _chat_users_cache
+
     users, _ = execute_query(
         "SELECT id, username, avatar, color, last_seen, created_at FROM chat_users ORDER BY last_seen DESC",
         fetchall=True
@@ -665,7 +687,6 @@ def chat_get_users():
     if not users:
         users = []
 
-    now = datetime.now()
     formatted = []
     for u in users:
         ls = u.get("last_seen")
@@ -706,7 +727,10 @@ def chat_get_users():
             "status_text": status_text
         })
 
-    return {"success": True, "users": formatted}
+    result = {"success": True, "users": formatted}
+    _chat_users_cache = result
+    _chat_users_cache_time = now_ts
+    return result
 
 @app.get("/api/chat/messages")
 def chat_get_messages(limit: int = 150, since_id: Optional[int] = None):
@@ -741,6 +765,8 @@ def chat_get_messages(limit: int = 150, since_id: Optional[int] = None):
 
 @app.post("/api/chat/messages")
 def chat_send_message(req: ChatMessageRequest):
+    global _chat_users_cache
+    _chat_users_cache = None
     username = (req.username or "").strip()
     text = (req.text or "").strip()
     image_url = req.image_url or None
