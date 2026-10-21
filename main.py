@@ -4,7 +4,7 @@ import asyncio
 from fastapi import FastAPI, HTTPException, Header, Query, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, Any
 from datetime import datetime
 from database import get_connection, init_db, is_mysql, get_friday_date
 
@@ -57,12 +57,17 @@ def execute_query(query, params=(), fetchone=False, fetchall=False, commit=True)
         
     last_id = cursor.lastrowid
     
-    if not is_mysql() and commit:
+    if commit and not is_mysql():
         conn.commit()
         
-    cursor.close()
-    if not is_mysql():
+    try:
+        cursor.close()
+    except Exception:
+        pass
+    try:
         conn.close()
+    except Exception:
+        pass
     return data, last_id
 
 def log_audit(order_id, action, performed_by, details):
@@ -541,12 +546,12 @@ class ChatHeartbeatRequest(BaseModel):
 
 class ChatMessageRequest(BaseModel):
     username: str
-    user_id: Optional[int] = None
+    user_id: Optional[Any] = None
     avatar: Optional[str] = "🚀"
     color: Optional[str] = "#6366f1"
     text: Optional[str] = ""
     image_url: Optional[str] = None
-    reply_to_id: Optional[int] = None
+    reply_to_id: Optional[Any] = None
     reply_to_text: Optional[str] = None
     reply_to_user: Optional[str] = None
 
@@ -776,6 +781,20 @@ def chat_send_message(req: ChatMessageRequest):
     if not text and not image_url:
         raise HTTPException(status_code=400, detail="Message text or image is required")
 
+    uid = None
+    if req.user_id:
+        try:
+            uid = int(req.user_id)
+        except (ValueError, TypeError):
+            uid = None
+
+    rid = None
+    if req.reply_to_id:
+        try:
+            rid = int(req.reply_to_id)
+        except (ValueError, TypeError):
+            rid = None
+
     # Touch user last_seen
     if is_mysql():
         execute_query("UPDATE chat_users SET last_seen = NOW() WHERE username = %s", (username,))
@@ -783,8 +802,8 @@ def chat_send_message(req: ChatMessageRequest):
             """INSERT INTO chat_messages 
                (user_id, username, avatar, color, text, image_url, reply_to_id, reply_to_text, reply_to_user, reactions, created_at)
                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, NOW())""",
-            (req.user_id, username, req.avatar or "🚀", req.color or "#6366f1",
-             text, image_url, req.reply_to_id, req.reply_to_text, req.reply_to_user, "{}")
+            (uid, username, req.avatar or "🚀", req.color or "#6366f1",
+             text, image_url, rid, req.reply_to_text, req.reply_to_user, "{}")
         )
     else:
         execute_query("UPDATE chat_users SET last_seen = datetime('now', '+05:30') WHERE username = ?", (username,))
@@ -792,8 +811,8 @@ def chat_send_message(req: ChatMessageRequest):
             """INSERT INTO chat_messages 
                (user_id, username, avatar, color, text, image_url, reply_to_id, reply_to_text, reply_to_user, reactions)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (req.user_id, username, req.avatar or "🚀", req.color or "#6366f1",
-             text, image_url, req.reply_to_id, req.reply_to_text, req.reply_to_user, "{}")
+            (uid, username, req.avatar or "🚀", req.color or "#6366f1",
+             text, image_url, rid, req.reply_to_text, req.reply_to_user, "{}")
         )
 
     new_msg, _ = execute_query(
